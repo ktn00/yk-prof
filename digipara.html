@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>でじぱら</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 100vh;
+      margin: 0;
+      font-family: sans-serif;
+    }
+    h1 { text-align: center; }
+    canvas { border: 1px solid #000; }
+    .toolbar {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+    }
+    button { margin-right: 5px; }
+    #previewPanel {
+      margin-top: 15px;
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    #previewPanel canvas {
+      cursor: pointer;
+    }
+    .preview-frame {
+      border: 1px solid gray;
+    }
+    .preview-frame.selected-frame {
+      border: 2px solid red;
+    }
+    .preview-frame.playing-frame {
+      border: 2px solid blue;
+    }
+  </style>
+</head>
+<body>
+  <h1>でじぱら</h1>
+
+  <canvas id="drawCanvas" width="400" height="300"></canvas>
+
+  <div class="toolbar">
+    <button id="playBtn" onclick="togglePlay()">再生</button>
+    <button onclick="prevFrame()">←</button>
+    <button onclick="nextFrame()">→</button>
+    <button onclick="addFrame()">+</button>
+    <button onclick="deleteFrame()">-</button>
+    <button onclick="clearCurrentFrame()">クリア</button>
+    <button onclick="undo()">Undo</button>
+  </div>
+  <div class="toolbar">
+    <button onclick="toggleEraser()">消しゴム: <span id="eraserStatus">OFF</span></button>
+    <label>
+      太さ:
+      <input type="range" id="brushSize" min="1" max="30" value="2" oninput="changeBrushSize(this.value)">
+      <span id="brushSizeValue">2</span>px
+    </label>
+    <label>
+      再生速度:
+      <select id="frameFPS">
+        <option value="2">2 fps</option>
+        <option value="4" selected>4 fps</option>
+        <option value="8">8 fps</option>
+      </select>
+    </label>
+    <span>フレーム: <span id="frameIndex">1</span></span>
+  </div>
+
+  <div id="previewPanel"></div>
+
+  <script>
+    const canvas = document.getElementById('drawCanvas');
+    const ctx = canvas.getContext('2d');
+    let drawing = false;
+    let frames = [];
+    let currentFrame = 0;
+
+    let isEraser = false;
+    let penSize = 2;
+    let eraserSize = 10;
+
+    let isPlaying = false;
+    let playInterval = null;
+
+    let undoStack = [];
+
+    let dragSrcIndex = null; // ドラッグ元のインデックス
+
+    ctx.lineCap = 'round';
+    ctx.lineWidth = penSize;
+    ctx.strokeStyle = '#000';
+
+    function getPos(e) {
+      if (e.touches) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: e.touches[0].clientX - rect.left,
+          y: e.touches[0].clientY - rect.top
+        };
+      } else {
+        return { x: e.offsetX, y: e.offsetY };
+      }
+    }
+
+    function startDrawing(e) {
+      e.preventDefault();
+      drawing = true;
+      const pos = getPos(e);
+      ctx.beginPath();
+      ctx.moveTo(pos.x, pos.y);
+      saveUndoState();
+    }
+
+    function draw(e) {
+      if (!drawing) return;
+      e.preventDefault();
+      const pos = getPos(e);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.stroke();
+    }
+
+    function stopDrawing(e) {
+      if (!drawing) return;
+      e.preventDefault();
+      drawing = false;
+      ctx.closePath();
+      saveCurrentFrame();
+    }
+
+    // マウス操作
+    canvas.addEventListener('mousedown', startDrawing);
+    canvas.addEventListener('mousemove', draw);
+    canvas.addEventListener('mouseup', stopDrawing);
+    canvas.addEventListener('mouseleave', stopDrawing);
+
+    // タッチ操作
+    canvas.addEventListener('touchstart', startDrawing);
+    canvas.addEventListener('touchmove', draw);
+    canvas.addEventListener('touchend', stopDrawing);
+    canvas.addEventListener('touchcancel', stopDrawing);
+
+    function saveUndoState() {
+      undoStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+      if (undoStack.length > 50) undoStack.shift();
+    }
+
+    function undo() {
+      if (undoStack.length > 0) {
+        const last = undoStack.pop();
+        ctx.putImageData(last, 0, 0);
+        saveCurrentFrame();
+      }
+    }
+
+    function saveCurrentFrame() {
+      frames[currentFrame] = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      updatePreviewPanel();
+    }
+
+    function loadFrame(index) {
+      if (frames[index]) {
+        ctx.putImageData(frames[index], 0, 0);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      document.getElementById('frameIndex').textContent = index + 1;
+      updatePreviewPanel();
+    }
+
+    function addFrame() {
+      saveCurrentFrame();
+      currentFrame++;
+      frames.splice(currentFrame, 0, null);
+      loadFrame(currentFrame);
+    }
+
+    function nextFrame() {
+      saveCurrentFrame();
+      if (currentFrame < frames.length - 1) currentFrame++;
+      loadFrame(currentFrame);
+    }
+
+    function prevFrame() {
+      saveCurrentFrame();
+      if (currentFrame > 0) currentFrame--;
+      loadFrame(currentFrame);
+    }
+
+    function togglePlay() {
+      const playBtn = document.getElementById('playBtn');
+      if (isPlaying) {
+        clearInterval(playInterval);
+        isPlaying = false;
+        playBtn.textContent = '再生';
+        highlightPlayingFrame(-1);
+        loadFrame(currentFrame);
+      } else {
+        let i = 0;
+        const fps = parseInt(document.getElementById('frameFPS').value);
+        const delay = 1000 / fps;
+        isPlaying = true;
+        playBtn.textContent = '停止';
+        playInterval = setInterval(() => {
+          if (i >= frames.length) i = 0;
+          if (frames[i]) {
+            ctx.putImageData(frames[i], 0, 0);
+          } else {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+          document.getElementById('frameIndex').textContent = i + 1;
+          highlightPlayingFrame(i);
+          i++;
+        }, delay);
+      }
+    }
+
+    function highlightPlayingFrame(index) {
+      const previews = document.querySelectorAll('#previewPanel canvas');
+      previews.forEach((canvas) => {
+        canvas.classList.remove('playing-frame');
+        if (parseInt(canvas.dataset.index) === index) {
+          canvas.classList.add('playing-frame');
+        }
+      });
+    }
+
+    function updatePreviewPanel() {
+      const panel = document.getElementById('previewPanel');
+      panel.innerHTML = '';
+
+      frames.forEach((frame, index) => {
+        const previewCanvas = document.createElement('canvas');
+        previewCanvas.width = 80;
+        previewCanvas.height = 60;
+        previewCanvas.dataset.index = index;
+        previewCanvas.classList.add('preview-frame');
+        if (index === currentFrame) previewCanvas.classList.add('selected-frame');
+
+        const previewCtx = previewCanvas.getContext('2d');
+        if (frame) {
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = canvas.width;
+          tempCanvas.height = canvas.height;
+          tempCanvas.getContext('2d').putImageData(frame, 0, 0);
+          previewCtx.drawImage(tempCanvas, 0, 0, previewCanvas.width, previewCanvas.height);
+        } else {
+          previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+        }
+
+        previewCanvas.onclick = () => {
+          saveCurrentFrame();
+          currentFrame = index;
+          loadFrame(currentFrame);
+        };
+
+        // ドラッグ＆ドロップ
+        previewCanvas.draggable = true;
+        previewCanvas.addEventListener("dragstart", (e) => {
+          dragSrcIndex = index;
+          e.dataTransfer.effectAllowed = "move";
+        });
+        previewCanvas.addEventListener("dragover", (e) => {
+          e.preventDefault();
+        });
+        previewCanvas.addEventListener("drop", (e) => {
+          e.preventDefault();
+          if (dragSrcIndex === null || dragSrcIndex === index) return;
+          const movedFrame = frames.splice(dragSrcIndex, 1)[0];
+          frames.splice(index, 0, movedFrame);
+          currentFrame = index;
+          updatePreviewPanel();
+          loadFrame(currentFrame);
+          dragSrcIndex = null;
+        });
+
+        panel.appendChild(previewCanvas);
+      });
+    }
+
+    function toggleEraser() {
+      isEraser = !isEraser;
+      ctx.strokeStyle = isEraser ? '#fff' : '#000';
+      ctx.lineWidth = isEraser ? eraserSize : penSize;
+      document.getElementById('eraserStatus').textContent = isEraser ? 'ON' : 'OFF';
+      document.getElementById('brushSize').value = isEraser ? eraserSize : penSize;
+      document.getElementById('brushSizeValue').textContent = isEraser ? eraserSize : penSize;
+    }
+
+    function changeBrushSize(size) {
+      const sizeNum = parseInt(size);
+      if (isEraser) {
+        eraserSize = sizeNum;
+      } else {
+        penSize = sizeNum;
+      }
+      ctx.lineWidth = sizeNum;
+      document.getElementById('brushSizeValue').textContent = sizeNum;
+    }
+
+    function deleteFrame() {
+      if (frames.length <= 1) {
+        alert("最低1つのフレームは必要です。");
+        return;
+      }
+      frames.splice(currentFrame, 1);
+      if (currentFrame >= frames.length) currentFrame = frames.length - 1;
+      loadFrame(currentFrame);
+    }
+
+    function clearCurrentFrame() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      frames[currentFrame] = null;
+      updatePreviewPanel();
+    }
+
+    document.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        undo();
+      }
+    });
+
+    frames.push(null);
+    updatePreviewPanel();
+  </script>
+</body>
+</html>
